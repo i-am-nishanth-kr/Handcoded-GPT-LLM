@@ -10,14 +10,17 @@ import torch.nn as nn
 from torch.nn import functional as F
 
 
+# Model
+
+
 class GPT2Config:
     def __init__(self):
         self.vocab_size = 50257
-        self.embed_dim = 768
-        self.seq_len = 1024 # this was called as block_size in karpathy code.
-        self.n_blocks = 12
-        self.n_heads = 12 
-        
+        self.embed_dim = 256
+        self.seq_len = 128
+        self.n_blocks = 6
+        self.n_heads = 8
+
     def to_dict(self):
         return dict(self.__dict__)
 
@@ -34,7 +37,7 @@ class MLP(nn.Module):
         self.linear_2 = nn.Linear(4 * config.embed_dim, config.embed_dim)
         # no input params for GELU
         self.gelu = nn.GELU()
-        
+
     def forward(self, inputs):
         x = self.linear_1(inputs)
         x = self.gelu(x)
@@ -54,12 +57,12 @@ class MHA(nn.Module):
         self.dropout = nn.Dropout(0.1)
         # torch.ones of full context window should be taken and lower triangle needs to be taken
         self.register_buffer('casual_mask', torch.tril(torch.ones(config.seq_len, config.seq_len)))
-        
-    
+
+
     def forward(self, x):
-        
+
         B, T, C = x.shape
-        
+
         wq = self.q_lin(x)
         wk = self.k_lin(x)
         wv = self.v_lin(x)
@@ -67,22 +70,22 @@ class MHA(nn.Module):
         wq = wq.view(B, T, self.n_heads, self.head_dim)
         wk = wk.view(B, T, self.n_heads, self.head_dim)
         wv = wv.view(B, T, self.n_heads, self.head_dim)
-        
+
         # now for a batch if inputs, each input tokens, the embedding is split for number of heads.
-        # we need to take this for matrix multiplication in attention. to make that efficient, we can group the embedding per per sentence to a head to embedding of the entire batch per head 
+        # we need to take this for matrix multiplication in attention. to make that efficient, we can group the embedding per per sentence to a head to embedding of the entire batch per head
         # swap dims 1 and 2 to get 2D matrix per head.
-        
+
         wq = wq.transpose(1,2)
         wk = wk.transpose(1,2)
         wv = wv.transpose(1,2)
-        
+
         # TODO -> does the below work for multi head attention?
         op_1 = wq @ wk.transpose(-2, -1)
         x = op_1 / (self.head_dim ** 0.5) # square root of head dims
-        
+
         mask = self.casual_mask[:T, :T]
-        x.masked_fill(mask==0, float("-inf"))
-        
+        x = x.masked_fill(mask==0, float("-inf"))
+
         x = F.softmax(x, dim = -1)
         x = self.dropout(x)
         x = x @ wv
@@ -91,35 +94,35 @@ class MHA(nn.Module):
 
         out = self.linear_out(x)
         return out
-        
+
 
 class Block(nn.Module):
     def __init__(self, config):
         super().__init__()
-        
+        # TODO : check documentation for input params here
         self.ln_f1 = nn.LayerNorm(config.embed_dim)
         self.mha = MHA(config)
         self.ln_f2 = nn.LayerNorm(config.embed_dim)
-        
+
         self.dropout_1 = nn.Dropout(0.1)
         self.mlp = MLP(config)
         self.dropout_2 = nn.Dropout(0.1)
 
-        
+
     def forward(self, inputs):
-        # inputs shape is (B, T, C)
+        # inputs: (B, T, C)
         x = self.ln_f1(inputs)
         x = self.mha(x)
         x = self.dropout_1(x)
-        x = x + inputs # residual 1
+        x = x + inputs                        # residual 1
 
         op_1 = self.ln_f2(x)
-        op_1 = self.mlp(op_1)
-        op_1 = self.dropout_2(op_1)
+        x = self.mlp(x)
+        x = self.dropout_2(x)
         # residual must add the UNnormalized x, not the layernormed one
         x = x + op_1
         return x
-        
+
 
 
 
@@ -139,6 +142,8 @@ class GPT2(nn.Module):
         # weight tying
         self.lm_head.weight = self.token_embedding.weight
 
+        # GPT-2 style init (std 0.02). Without this, the tied embedding starts at
+        # std 1.0 and the initial loss is huge instead of ~ln(vocab_size).
         self.apply(self._init_weights)
         # scale down the layers that write into the residual stream
         for name, p in self.named_parameters():
@@ -185,7 +190,8 @@ class GPT2(nn.Module):
         return token_ids
 
 
-# data part
+# Data
+
 def get_device():
     if torch.cuda.is_available():
         return "cuda"
@@ -239,7 +245,10 @@ def get_batch(data, batch_size, seq_len, device):
     y = torch.stack([torch.from_numpy(data[i + 1:i + 1 + seq_len].astype(np.int64)) for i in ix])
     return x.to(device), y.to(device)
 
+
+
 # Train / eval
+
 def get_lr(step, max_lr, warmup, max_steps):
     min_lr = max_lr * 0.1
     if step < warmup:
@@ -324,7 +333,6 @@ def train(args):
         for g in optimizer.param_groups:
             g["lr"] = lr
 
-        # ---- evaluation + checkpoint ----
         if step % args.eval_interval == 0:
             losses = estimate_loss(model, train_data, val_data, args, device, amp_ctx)
             print(f"[eval] step {step}: train {losses['train']:.4f} | val {losses['val']:.4f} "
@@ -361,7 +369,10 @@ def train(args):
             t0 = time.time()
             print(f"step {step} | loss {loss.item():.4f} | lr {lr:.2e} | {dt:.1f}s/50 steps")
 
+
+
 # Generation from a saved checkpoint
+
 def generate_text(args):
     import tiktoken
     torch.manual_seed(42)
@@ -379,7 +390,10 @@ def generate_text(args):
     print("-" * 60)
     print(enc.decode(out[0].tolist()))
 
-# dummy sanity test
+
+
+# Sanity tests (old main)
+
 def run_tests():
     torch.manual_seed(0)
     config = GPT2Config()
@@ -403,36 +417,28 @@ def run_tests():
     loss = F.cross_entropy(model(x).reshape(-1, config.vocab_size), y.reshape(-1))
     print(f"initial loss: {loss.item():.3f} (expected ~ {math.log(config.vocab_size):.2f})")
 
+get_device()
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    sub = parser.add_subparsers(dest="cmd", required=True)
+parser = argparse.ArgumentParser()
+sub = parser.add_subparsers(dest="cmd", required=True)
 
-    p = sub.add_parser("train")
-    p.add_argument("--data", default="60k_stories.parquet")
-    p.add_argument("--out_dir", default="checkpoints")
-    p.add_argument("--n_blocks", type=int, default=6)
-    p.add_argument("--batch_size", type=int, default=64)
-    p.add_argument("--max_steps", type=int, default=5000)
-    p.add_argument("--eval_interval", type=int, default=250)
-    p.add_argument("--eval_iters", type=int, default=50)
-    p.add_argument("--lr", type=float, default=3e-4)
-    p.add_argument("--warmup", type=int, default=200)
-    p.add_argument("--resume", action="store_true")
+p = sub.add_parser("train")
+p.add_argument("--data", default="60k_stories.parquet")
+p.add_argument("--out_dir", default="checkpoints")
+p.add_argument("--n_blocks", type=int, default=6)
+p.add_argument("--batch_size", type=int, default=64)
+p.add_argument("--max_steps", type=int, default=5000)
+p.add_argument("--eval_interval", type=int, default=250)
+p.add_argument("--eval_iters", type=int, default=50)
+p.add_argument("--lr", type=float, default=5e-4)
+p.add_argument("--warmup", type=int, default=200)
+p.add_argument("--resume", action="store_true")
 
-    g = sub.add_parser("generate")
-    g.add_argument("--ckpt", default="checkpoints/best.pt")
-    g.add_argument("--prompt", default="Once upon a time")
-    g.add_argument("--max_new_tokens", type=int, default=150)
-    g.add_argument("--temperature", type=float, default=0.8)
-    g.add_argument("--top_k", type=int, default=50)
+g = sub.add_parser("generate")
+g.add_argument("--ckpt", default="checkpoints/best.pt")
+g.add_argument("--prompt", default="Once upon a time")
+g.add_argument("--max_new_tokens", type=int, default=150)
+g.add_argument("--temperature", type=float, default=0.8)
+g.add_argument("--top_k", type=int, default=50)
 
-    sub.add_parser("test")
-
-    args = parser.parse_args()
-    if args.cmd == "train":
-        train(args)
-    elif args.cmd == "generate":
-        generate_text(args)
-    else:
-        run_tests()
+sub.add_parser("test")
