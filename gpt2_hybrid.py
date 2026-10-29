@@ -114,17 +114,13 @@ class Block(nn.Module):
         x = self.ln_f1(inputs)
         x = self.mha(x)
         x = self.dropout_1(x)
-        x = x + inputs                        # residual 1
+        residual_1 = x + inputs                        # residual 1
 
-        op_1 = self.ln_f2(x)
+        x = self.ln_f2(residual_1)
         x = self.mlp(x)
         x = self.dropout_2(x)
-        # residual must add the UNnormalized x, not the layernormed one
-        x = x + op_1
+        x = x + residual_1
         return x
-
-
-
 
 class GPT2(nn.Module):
     def __init__(self, config):
